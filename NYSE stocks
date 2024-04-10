@@ -1,0 +1,101 @@
+import os
+import requests
+import smtplib
+from email.message import EmailMessage
+import time
+from datetime import datetime, timedelta
+import pytz
+import pandas_market_calendars as mcal
+
+# Environment Variables
+ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY')
+EMAIL_SENDER = os.getenv('EMAIL_SENDER')
+EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
+EMAIL_RECEIVER = 'receiver_email@example.com'
+
+# Configuration
+stock_symbol = "AAPL"
+percentage_change_threshold = 5  # Alert if the stock moves 5%
+check_interval = 60 * 60 * 24 / 25  # Spread 25 requests evenly over 24 hours
+user_timezone = "America/New_York"
+
+# NYSE Calendar
+nyse = mcal.get_calendar('NYSE')
+
+# Global counter and timestamp to manage API usage
+api_requests_made = 0
+api_usage_day = datetime.now().date()
+
+def send_email(subject, content):
+    msg = EmailMessage()
+    msg.set_content(content)
+    msg['Subject'] = subject
+    msg['From'] = EMAIL_SENDER
+    msg['To'] = EMAIL_RECEIVER
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+
+def is_market_open(user_tz):
+    # (This function remains unchanged)
+    ...
+
+def fetch_stock_price(symbol):
+    global api_requests_made, api_usage_day
+
+    # Reset daily API request count if it's a new day
+    if datetime.now().date() > api_usage_day:
+        api_requests_made = 0
+        api_usage_day = datetime.now().date()
+
+    # Check if API request limit reached
+    if api_requests_made >= 25:
+        print("Reached daily API request limit.")
+        return None, None
+
+    try:
+        url = f'https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=5min&apikey={ALPHA_VANTAGE_API_KEY}'
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            if "Note" in data:
+                print("API request limit reached. Please try again later.")
+                return None, None
+            time_series = data.get('Time Series (5min)', {})
+            latest_time = sorted(time_series.keys())[-1]
+            latest_data = time_series[latest_time]
+            opening_price = float(latest_data['1. open'])
+            closing_price = float(latest_data['4. close'])
+            api_requests_made += 1
+            return opening_price, closing_price
+        else:
+            print("Failed to fetch stock price data.")
+            return None, None
+    except requests.exceptions.RequestException as e:
+        print(f"Network error: {e}")
+        return None, None
+
+def check_stock():
+    if not is_market_open(user_timezone):
+        print("Market is currently closed or today is a holiday. Waiting for market hours...")
+        return
+
+    opening_price, closing_price = fetch_stock_price(stock_symbol)
+    if opening_price is None or closing_price is None:
+        return  # Early return if there was an error fetching the stock price
+
+    percentage_change = ((closing_price - opening_price) / opening_price) * 100
+    if abs(percentage_change) >= percentage_change_threshold:
+        direction = "up" if percentage_change > 0 else "down"
+        subject = f"Stock Alert: {stock_symbol}"
+        content = f"{stock_symbol} moved {direction} by {abs(percentage_change):.2f}% today."
+        send_email(subject, content)
+
+while True:
+    check_stock()
+    time.sleep(check_interval)
